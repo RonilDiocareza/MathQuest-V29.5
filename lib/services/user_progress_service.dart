@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class UserProgress {
   static const int npcQuestionCount = 6;
@@ -12,6 +14,7 @@ class UserProgress {
   final int unlockedLevels;
   final int questAttempts;
   final Map<int, int> maxUnlockedSubLevel;
+  final Map<int, LevelQuestionAnswer> levelQuestionAnswers;
 
   UserProgress({
     required this.completedLevels,
@@ -20,6 +23,7 @@ class UserProgress {
     required this.unlockedLevels,
     required this.questAttempts,
     required this.maxUnlockedSubLevel,
+    this.levelQuestionAnswers = const {},
   });
 
   int get completedCount => completedLevels.length;
@@ -85,8 +89,70 @@ class UserProgress {
       completedLevels.isEmpty ? 0 : completedLevels.reduce(max);
 }
 
+class LevelQuestionAnswer {
+  const LevelQuestionAnswer({
+    required this.firstOperand,
+    required this.secondOperand,
+    required this.operation,
+    required this.correctAnswer,
+  });
+
+  final int firstOperand;
+  final int secondOperand;
+  final String operation;
+  final int correctAnswer;
+
+  factory LevelQuestionAnswer.fromData(Object? value) {
+    if (value is! Map<String, dynamic>) {
+      throw const FormatException('Invalid saved level question.');
+    }
+    final firstOperand = value['firstOperand'];
+    final secondOperand = value['secondOperand'];
+    final operation = value['operation'];
+    final correctAnswer = value['correctAnswer'];
+    if (firstOperand is! num ||
+        secondOperand is! num ||
+        operation is! String ||
+        correctAnswer is! num ||
+        (operation != '+' && operation != '-') ||
+        (operation == '+' &&
+            firstOperand.toInt() + secondOperand.toInt() !=
+                correctAnswer.toInt()) ||
+        (operation == '-' &&
+            firstOperand.toInt() - secondOperand.toInt() !=
+                correctAnswer.toInt())) {
+      throw const FormatException('Invalid saved level question.');
+    }
+    return LevelQuestionAnswer(
+      firstOperand: firstOperand.toInt(),
+      secondOperand: secondOperand.toInt(),
+      operation: operation,
+      correctAnswer: correctAnswer.toInt(),
+    );
+  }
+
+  Map<String, dynamic> toData() => {
+        'firstOperand': firstOperand,
+        'secondOperand': secondOperand,
+        'operation': operation,
+        'correctAnswer': correctAnswer,
+      };
+}
+
+class LevelQuestionCompletion {
+  const LevelQuestionCompletion({
+    required this.answer,
+    required this.wasAlreadyCompleted,
+  });
+
+  final LevelQuestionAnswer answer;
+  final bool wasAlreadyCompleted;
+}
+
 class UserProgressService {
   static final _users = FirebaseFirestore.instance.collection('users');
+  static const _gameModeFinalScoreKeyPrefix =
+      'mathquest_game_mode_final_score_';
   static String? _cachedCurrentUid;
   static Future<UserProgress>? _cachedCurrentProgress;
 
@@ -135,6 +201,8 @@ class UserProgressService {
     }
     final rawSublevels =
         progress['maxUnlockedSubLevel'] as Map<String, dynamic>? ?? {};
+    final rawLevelQuestionAnswers =
+        progress['levelQuestionAnswers'] as Map<String, dynamic>? ?? {};
     return UserProgress(
       completedLevels: completed,
       completedNpcQuestions: completedNpcQuestions,
@@ -145,6 +213,11 @@ class UserProgressService {
         1: (rawSublevels['1'] as num?)?.toInt() ?? 1,
         2: (rawSublevels['2'] as num?)?.toInt() ?? 1,
         3: (rawSublevels['3'] as num?)?.toInt() ?? 1,
+      },
+      levelQuestionAnswers: {
+        for (final entry in rawLevelQuestionAnswers.entries)
+          if (int.tryParse(entry.key) case final int level when level >= 1 && level <= 60)
+            level: LevelQuestionAnswer.fromData(entry.value),
       },
     );
   }
@@ -187,6 +260,132 @@ class UserProgressService {
   static void _invalidateCurrentProgressCache() {
     _cachedCurrentUid = null;
     _cachedCurrentProgress = null;
+  }
+
+  static Future<LevelQuestionCompletion> completeLevelQuestion(
+    int level,
+    LevelQuestionAnswer answer,
+  ) async {
+    if (level < 1 || level > 60) {
+      throw ArgumentError.value(level, 'level');
+    }
+
+    var stage = 'resolve authenticated user';
+    try {
+      final authUser = FirebaseAuth.instance.currentUser;
+      debugPrint(
+        'Level Question save: authenticated=${authUser != null}.',
+      );
+      final uid = _uid();
+      final userRef = _users.doc(uid);
+      debugPrint(
+        'Level Question save: targetMatchesAuthenticated=${authUser?.uid == uid}, '
+        'document=users/{uid}, field=progress.levelQuestionAnswers.$level.',
+      );
+
+      stage = 'read user progress transaction';
+      final completion =
+          await FirebaseFirestore.instance.runTransaction<
+              LevelQuestionCompletion>(
+        (transaction) async {
+          debugPrint('Level Question save: reading users/{uid}.');
+          final snapshot = await transaction.get(userRef);
+          debugPrint(
+            'Level Question save: read completed; '
+            'documentExists=${snapshot.exists}.',
+          );
+          if (!snapshot.exists) {
+            throw StateError('The user progress document does not exist.');
+          }
+
+          stage = 'parse existing user progress';
+          final progress = _fromData(snapshot.data());
+          final savedAnswer = progress.levelQuestionAnswers[level];
+          if (savedAnswer != null) {
+            debugPrint(
+              'Level Question save: level $level was already completed; '
+              'no write required.',
+            );
+            return LevelQuestionCompletion(
+              answer: savedAnswer,
+              wasAlreadyCompleted: true,
+            );
+          }
+
+          stage = 'write levelQuestionAnswers transaction';
+          final payload = {
+            'progress': {
+              'levelQuestionAnswers': {
+                ...progress.levelQuestionAnswers.map(
+                  (savedLevel, saved) => MapEntry(
+                    savedLevel.toString(),
+                    saved.toData(),
+                  ),
+                ),
+                level.toString(): answer.toData(),
+              },
+            },
+          };
+          debugPrint(
+            'Level Question save: writing users/{uid}; '
+            'payloadFields=progress.levelQuestionAnswers, '
+            'answerFields=firstOperand,secondOperand,operation,correctAnswer.',
+          );
+          transaction.set(userRef, payload, SetOptions(merge: true));
+          return LevelQuestionCompletion(
+            answer: answer,
+            wasAlreadyCompleted: false,
+          );
+        },
+      );
+      debugPrint(
+        'Level Question save: transaction committed; '
+        'alreadyCompleted=${completion.wasAlreadyCompleted}.',
+      );
+      _invalidateCurrentProgressCache();
+      return completion;
+    } on FirebaseException catch (error, stackTrace) {
+      debugPrint(
+        'Level Question save failed during "$stage": '
+        '${error.runtimeType}, code=${error.code}, message=${error.message}.',
+      );
+      debugPrintStack(stackTrace: stackTrace);
+      Error.throwWithStackTrace(error, stackTrace);
+    } catch (error, stackTrace) {
+      debugPrint(
+        'Level Question save failed during "$stage": '
+        '${error.runtimeType}: $error.',
+      );
+      debugPrintStack(stackTrace: stackTrace);
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+  }
+
+  static Future<void> saveGameModeFinalScore(int level, int score) async {
+    if (level < 1 || level > 60) {
+      throw ArgumentError.value(level, 'level');
+    }
+    if (score < 0) throw ArgumentError.value(score, 'score');
+
+    final uid = _uid();
+    final preferences = await SharedPreferences.getInstance();
+    final saved = await preferences.setInt(
+      '$_gameModeFinalScoreKeyPrefix${uid}_$level',
+      score,
+    );
+    if (!saved) {
+      throw StateError('Could not persist the Game Mode final score.');
+    }
+  }
+
+  static Future<int?> getGameModeFinalScore(int level, {String? uid}) async {
+    if (level < 1 || level > 60) {
+      throw ArgumentError.value(level, 'level');
+    }
+    final preferences = await SharedPreferences.getInstance();
+    return preferences.getInt(
+      '$_gameModeFinalScoreKeyPrefix${_uid(uid)}_$level',
+    );
   }
 
   static Future<void> saveLevelCompletion(int level, {String? email}) async {

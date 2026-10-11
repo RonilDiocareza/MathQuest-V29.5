@@ -179,12 +179,36 @@ export const registerStudent = onCall(async (request) => {
       lrn,
       character,
       profilePhotoUrl: "",
+      tutorialEligible: true,
+      tutorialCompleted: false,
     });
   });
 
   return {
     registered: true,
   };
+});
+
+export const completeFirstTimeTutorial = onCall(async (request) => {
+  const uid = await requireCurrentSession(request);
+  const userRef = db.collection("users").doc(uid);
+  const userSnapshot = await userRef.get();
+  const user = userSnapshot.data();
+
+  if (!userSnapshot.exists || user?.tutorialEligible !== true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "This account is not eligible for the first-time tutorial.",
+    );
+  }
+
+  if (user.tutorialCompleted !== true) {
+    await userRef.update({
+      tutorialCompleted: true,
+    });
+  }
+
+  return { completed: true };
 });
 
 export const claimLoginSession = onCall(async (request) => {

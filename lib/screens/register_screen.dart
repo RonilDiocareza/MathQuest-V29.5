@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../game/player.dart';
 import '../services/auth_service.dart';
@@ -108,17 +107,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   String _registrationErrorMessage(Object error) {
-    if (error is FirebaseFunctionsException) {
-      return switch (error.code) {
-        'already-exists' => 'This LRN is already registered to an account.',
-        'invalid-argument' =>
-          'Enter a valid 12-digit LRN and complete all fields.',
-        'unavailable' ||
-        'deadline-exceeded' =>
-          'Could not reach the registration service. Check your connection and try again.',
-        _ => 'Could not complete registration. Please try again.',
-      };
-    }
     if (error is FirebaseAuthException) {
       return switch (error.code) {
         'email-already-in-use' => 'An account already uses this email.',
@@ -126,6 +114,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
         'invalid-email' => 'Enter a valid email address.',
         _ => 'Could not create the account. Please try again.',
       };
+    }
+    if (error is FirebaseException && error.code == 'permission-denied') {
+      return 'This LRN may already be registered, or the account could not be saved. Check the details and try again.';
     }
     return 'Could not complete registration. Please try again.';
   }

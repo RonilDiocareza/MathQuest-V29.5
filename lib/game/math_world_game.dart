@@ -592,6 +592,7 @@ class MathWorldGame extends FlameGame
 
   void pauseWorld() {
     isMovementPaused = true;
+    if (!isGameLoaded) return;
     stopMove();
     player.lastMove.setZero();
     player.isMoving = false;
@@ -599,6 +600,7 @@ class MathWorldGame extends FlameGame
 
   void resumeWorld() {
     isMovementPaused = false;
+    if (!isGameLoaded) return;
     player.moveDirection.setZero();
     player.isMoving = false;
   }

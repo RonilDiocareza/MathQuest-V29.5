@@ -46,6 +46,29 @@ void main() {
     }
   });
 
+  test('saved Level Question answer preserves the generated expression', () {
+    const savedAnswer = LevelQuestionAnswer(
+      firstOperand: 12,
+      secondOperand: 12,
+      operation: '+',
+      correctAnswer: 24,
+    );
+
+    final restored = LevelQuestionAnswer.fromData(savedAnswer.toData());
+
+    expect(restored.firstOperand, 12);
+    expect(restored.secondOperand, 12);
+    expect(restored.operation, '+');
+    expect(restored.correctAnswer, 24);
+    expect(
+      () => LevelQuestionAnswer.fromData({
+        ...savedAnswer.toData(),
+        'correctAnswer': 25,
+      }),
+      throwsFormatException,
+    );
+  });
+
   test('NPC completion is isolated to its Game Mode level', () {
     final progress = UserProgress(
       completedLevels: const [],

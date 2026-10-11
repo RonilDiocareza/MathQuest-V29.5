@@ -1,7 +1,6 @@
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,6 +37,9 @@ class AuthService {
           'Create the users document with this exact ID in the same Firebase project.',
         );
       }
+      if (!account.isApproved) {
+        throw StateError('Account pending admin approval.');
+      }
       final preferences = await SharedPreferences.getInstance();
       await preferences.setString(
         '$_sessionIdKeyPrefix$uid',
@@ -68,24 +70,15 @@ class AuthService {
     required String lrn,
     required String character,
   }) async {
-    late UserCredential credential;
-    var createdAuthUser = false;
-    try {
-      credential = await _auth.createUserWithEmailAndPassword(
-        email: email.trim().toLowerCase(),
-        password: password,
-      );
-      createdAuthUser = true;
-    } on FirebaseAuthException catch (error) {
-      if (error.code != 'email-already-in-use') rethrow;
-      credential = await _auth.signInWithEmailAndPassword(
-        email: email.trim().toLowerCase(),
-        password: password,
-      );
-    }
+    final normalizedEmail = email.trim().toLowerCase();
+    final credential = await _auth.createUserWithEmailAndPassword(
+      email: normalizedEmail,
+      password: password,
+    );
+    final authUser = credential.user!;
     final account = UserAccount(
-      uid: credential.user!.uid,
-      email: email.trim().toLowerCase(),
+      uid: authUser.uid,
+      email: normalizedEmail,
       role: 'student',
       status: 'pending',
       name: name,
@@ -94,34 +87,45 @@ class AuthService {
       character: character,
     );
     try {
-      await FirebaseFunctions.instance.httpsCallable('registerStudent').call({
-        'name': name,
-        'address': address,
+      final batch = FirebaseFirestore.instance.batch();
+      final userData = account.toJson()
+        ..['tutorialEligible'] = true
+        ..['tutorialCompleted'] = false;
+      batch.set(_users.doc(authUser.uid), userData);
+      batch.set(FirebaseFirestore.instance.collection('lrnIndexes').doc(lrn), {
+        'uid': authUser.uid,
         'lrn': lrn,
-        'character': character,
+        'createdAt': FieldValue.serverTimestamp(),
       });
-      if (createdAuthUser) {
+      await batch.commit();
+
+      try {
         await LeaderboardService.createRegistrationEntry(
-          uid: credential.user!.uid,
+          uid: authUser.uid,
           displayName: name,
         );
+      } catch (error, stackTrace) {
+        debugPrint(
+            'Unable to initialize pending student leaderboard entry: $error');
+        debugPrintStack(stackTrace: stackTrace);
       }
     } catch (error) {
-      if (createdAuthUser &&
-          error is FirebaseFunctionsException &&
-          (error.code == 'already-exists' ||
-              error.code == 'invalid-argument')) {
-        try {
-          await credential.user!.delete();
-        } catch (cleanupError, stackTrace) {
-          debugPrint('Unable to clean up rejected registration: $cleanupError');
-          debugPrintStack(stackTrace: stackTrace);
-        }
+      try {
+        await authUser.delete();
+      } catch (cleanupError, stackTrace) {
+        debugPrint('Unable to clean up rejected registration: $cleanupError');
+        debugPrintStack(stackTrace: stackTrace);
       }
-      await _auth.signOut();
       rethrow;
+    } finally {
+      try {
+        await _auth.signOut();
+      } catch (error, stackTrace) {
+        debugPrint('Unable to sign out after registration: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
     }
-    await _auth.signOut();
+
     return account;
   }
 
@@ -149,8 +153,16 @@ class AuthService {
     });
   }
 
-  static Future<void> deleteAccount(UserAccount account) {
-    return _users.doc(account.uid).delete();
+  static Future<void> deleteAccount(UserAccount account) async {
+    final lrnIndex =
+        FirebaseFirestore.instance.collection('lrnIndexes').doc(account.lrn);
+    await FirebaseFirestore.instance.runTransaction((transaction) async {
+      final indexSnapshot = await transaction.get(lrnIndex);
+      transaction.delete(_users.doc(account.uid));
+      if (indexSnapshot.data()?['uid'] == account.uid) {
+        transaction.delete(lrnIndex);
+      }
+    });
   }
 
   static Future<void> updateCurrentProfile({

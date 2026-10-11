@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import '../services/user_progress_service.dart';
 import '../services/leaderboard_service.dart';
@@ -20,6 +21,9 @@ class MathProblemScreen extends StatefulWidget {
 class _MathProblemScreenState extends State<MathProblemScreen> {
   late int currentLevel;
   late String problem;
+  late int firstOperand;
+  late int secondOperand;
+  late String operation;
   late int correctAnswer;
 
   final TextEditingController answerController = TextEditingController();
@@ -27,7 +31,7 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
   String feedback = '';
   bool isCorrect = false;
   bool isWaitingNextQuestion = false;
-  bool _isSubmitting = false;
+  bool _isSubmitting = true;
   bool _isGameModeUnlocked = false;
   bool _isGameModeLaunching = false;
   final Random _random = Random();
@@ -37,16 +41,40 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
     super.initState();
     currentLevel = widget.level;
     generateProblem();
-    _loadGameModeAccess();
+    _loadQuestionState();
   }
 
-  Future<void> _loadGameModeAccess() async {
-    final progress = await UserProgressService.getCurrentUserProgress();
-    if (!mounted) return;
-    setState(() {
-      _isGameModeUnlocked = _isGameModeUnlocked ||
-          progress.completedLevels.contains(currentLevel);
-    });
+  Future<void> _loadQuestionState() async {
+    try {
+      final progress = await UserProgressService.getCurrentUserProgress();
+      if (!mounted) return;
+      final savedAnswer = progress.levelQuestionAnswers[currentLevel];
+      setState(() {
+        _isGameModeUnlocked = savedAnswer != null ||
+            progress.completedLevels.contains(currentLevel);
+        if (savedAnswer != null) {
+          firstOperand = savedAnswer.firstOperand;
+          secondOperand = savedAnswer.secondOperand;
+          operation = savedAnswer.operation;
+          correctAnswer = savedAnswer.correctAnswer;
+          problem = '$firstOperand $operation $secondOperand = ?';
+          isCorrect = true;
+          isWaitingNextQuestion = true;
+          feedback = 'Correct!';
+        }
+        _isSubmitting = false;
+      });
+    } catch (error, stackTrace) {
+      debugPrint('Unable to load Level Question completion: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not load this question. Please try again.'),
+        ),
+      );
+    }
   }
 
   @override
@@ -66,6 +94,9 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
     bool isAddition = currentLevel <= 5 || _random.nextBool();
 
     if (isAddition) {
+      firstOperand = num1;
+      secondOperand = num2;
+      operation = '+';
       problem = '$num1 + $num2 = ?';
       correctAnswer = num1 + num2;
     } else {
@@ -74,18 +105,27 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
         num1 = num2;
         num2 = temp;
       }
+      firstOperand = num1;
+      secondOperand = num2;
+      operation = '-';
       problem = '$num1 - $num2 = ?';
       correctAnswer = num1 - num2;
     }
   }
 
-  Future<void> _saveLevelProgress(int level) async {
-    await UserProgressService.saveLevelCompletion(level);
-  }
-
   Future<void> checkAnswer() async {
-    if (_isSubmitting) return;
+    if (_isSubmitting) {
+      debugPrint(
+        'MathProblemScreen.checkAnswer: ignored duplicate submission '
+        'while a submission is in progress.',
+      );
+      return;
+    }
 
+    debugPrint(
+      'MathProblemScreen.checkAnswer: starting answer validation '
+      'for level $currentLevel.',
+    );
     setState(() {
       _isSubmitting = true;
     });
@@ -93,6 +133,10 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
     final userAnswer = int.tryParse(answerController.text);
 
     if (userAnswer == null) {
+      debugPrint(
+        'MathProblemScreen.checkAnswer: answer evaluation failed; '
+        'input is not a valid integer.',
+      );
       setState(() {
         feedback = 'Enter number!';
         isCorrect = false;
@@ -102,28 +146,95 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
     }
 
     if (userAnswer == correctAnswer) {
-      setState(() {
-        feedback = 'Correct!';
-        isCorrect = true;
-        isWaitingNextQuestion = true;
-        _isGameModeUnlocked = true;
-      });
-
-      await _saveLevelProgress(currentLevel);
-      await _saveLeaderboardPoints(10);
+      debugPrint(
+        'MathProblemScreen.checkAnswer: answer evaluated as correct; '
+        'starting Level Question progress save.',
+      );
+      final answer = LevelQuestionAnswer(
+        firstOperand: firstOperand,
+        secondOperand: secondOperand,
+        operation: operation,
+        correctAnswer: correctAnswer,
+      );
+      final LevelQuestionCompletion completion;
+      try {
+        debugPrint(
+          'MathProblemScreen.checkAnswer: awaiting '
+          'UserProgressService.completeLevelQuestion for level '
+          '$currentLevel.',
+        );
+        completion = await UserProgressService.completeLevelQuestion(
+          currentLevel,
+          answer,
+        );
+        debugPrint(
+          'MathProblemScreen.checkAnswer: progress save returned '
+          'successfully; alreadyCompleted=${completion.wasAlreadyCompleted}.',
+        );
+      } catch (error, stackTrace) {
+        final firebaseDetails = error is FirebaseException
+            ? ', firebaseCode=${error.code}, firebaseMessage=${error.message}'
+            : '';
+        debugPrint(
+          'MathProblemScreen.checkAnswer: Level Question progress save '
+          'failed; exceptionType=${error.runtimeType}$firebaseDetails, '
+          'message=$error.',
+        );
+        debugPrintStack(stackTrace: stackTrace);
+        if (!mounted) return;
+        setState(() => _isSubmitting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_answerSaveErrorMessage(error)),
+          ),
+        );
+        return;
+      }
 
       if (mounted) {
         setState(() {
+          firstOperand = completion.answer.firstOperand;
+          secondOperand = completion.answer.secondOperand;
+          operation = completion.answer.operation;
+          correctAnswer = completion.answer.correctAnswer;
+          problem = '$firstOperand $operation $secondOperand = ?';
+          feedback = 'Correct!';
+          isCorrect = true;
+          isWaitingNextQuestion = true;
+          _isGameModeUnlocked = true;
           _isSubmitting = false;
         });
       }
+      if (!completion.wasAlreadyCompleted) {
+        await _saveLeaderboardPoints(10);
+      }
     } else {
+      debugPrint(
+        'MathProblemScreen.checkAnswer: answer evaluated as incorrect; '
+        'preserving retry behavior without saving completion.',
+      );
       setState(() {
         feedback = 'Wrong!';
         isCorrect = false;
         _isSubmitting = false;
       });
     }
+  }
+
+  String _answerSaveErrorMessage(Object error) {
+    if (error is! FirebaseException) {
+      return 'Could not save your answer. Please try again.';
+    }
+
+    return switch (error.code) {
+      'permission-denied' =>
+        'You do not have permission to save this answer. Please contact support.',
+      'unauthenticated' =>
+        'Your session has expired. Please sign in again to save your answer.',
+      'unavailable' =>
+        'Answer saving is temporarily unavailable. Please try again.',
+      _ => 'Could not save your answer (${error.code}). Please try again.',
+    };
   }
 
   Future<void> _saveLeaderboardPoints(int points) async {
@@ -230,13 +341,30 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
                     ),
                     child: Column(
                       children: [
-                        Text(
-                          problem,
-                          style: const TextStyle(
-                            fontSize: 32,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFFFF9800),
-                          ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            _buildMathOperandRow('', firstOperand),
+                            _buildMathOperandRow(operation, secondOperand),
+                            Container(
+                              width: 132,
+                              height: 2,
+                              color: const Color(0xFFFF9800),
+                            ),
+                            SizedBox(
+                              width: 132,
+                              child: Text(
+                                isWaitingNextQuestion ? '$correctAnswer' : '?',
+                                textAlign: TextAlign.right,
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 32,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFFFF9800),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: 20),
                         CustomTextField(
@@ -324,6 +452,41 @@ class _MathProblemScreenState extends State<MathProblemScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildMathOperandRow(String operator, int operand) {
+    return SizedBox(
+      width: 132,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 32,
+            child: Text(
+              operator,
+              textAlign: TextAlign.left,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFFF9800),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              '$operand',
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFFF9800),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

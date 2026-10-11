@@ -46,6 +46,7 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
   bool _isExitDialogOpen = false;
   bool _isGameOverDialogOpen = false;
   bool _isLeaving = false;
+  bool _isFinalizingLevel = false;
   late Future<void> _orientationChange;
   late Future<void> _musicInitialization;
 
@@ -58,6 +59,30 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
     currentProblem = widget.problem;
     currentCorrectAnswer = widget.correctAnswer;
     gameInstance = _createGame();
+    gameInstance.pauseWorld();
+    _restoreCompletedGameModeScore();
+  }
+
+  Future<void> _restoreCompletedGameModeScore() async {
+    try {
+      final progress = await UserProgressService.getCurrentUserProgress();
+      if (!mounted) return;
+      if (progress.completedLevels.contains(currentLevel)) {
+        final finalScore =
+            await UserProgressService.getGameModeFinalScore(currentLevel);
+        if (!mounted) return;
+        setState(() {
+          score = finalScore ?? 0;
+          levelCompleted = true;
+        });
+        return;
+      }
+      gameInstance.resumeWorld();
+    } catch (error, stackTrace) {
+      debugPrint('Unable to restore completed Game Mode score: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (mounted) gameInstance.resumeWorld();
+    }
   }
 
   MathWorldGame _createGame() => MathWorldGame(
@@ -183,6 +208,7 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
   }
 
   Future<void> _onNpcQuestion(NpcQuestion question) async {
+    if (!mounted || levelCompleted || _isLeaving) return;
     final activeGame = gameInstance;
     bool? isCorrect;
     try {
@@ -379,7 +405,24 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
   }
 
   Future<void> _advanceToNextLevel(NavigatorState navigator) async {
-    await _saveLevelProgress(currentLevel);
+    if (_isFinalizingLevel || _isLeaving) return;
+    _isFinalizingLevel = true;
+    try {
+      await _saveLevelProgress(currentLevel);
+      await UserProgressService.saveGameModeFinalScore(currentLevel, score);
+    } catch (error, stackTrace) {
+      _isFinalizingLevel = false;
+      debugPrint('Unable to persist completed Game Mode score: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not save the final score. Please try again.'),
+          ),
+        );
+      }
+      return;
+    }
     if (!mounted) return;
 
     _isLeaving = true;

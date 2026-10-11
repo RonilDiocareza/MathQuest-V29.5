@@ -327,14 +327,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         )
                       else
                         const SizedBox(width: 24),
-                      GestureDetector(
-                        onTap: _isSavingProfile
-                            ? null
-                            : widget.onClose ??
-                                () => Navigator.maybePop(context),
-                        child: const Icon(Icons.close,
-                            size: 24, color: Color(0xFF2B3B5A)),
-                      ),
+                      const SizedBox(width: 24),
                     ],
                   ),
                   const SizedBox(height: 4),

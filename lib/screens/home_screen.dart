@@ -5,7 +5,9 @@ import '../widgets/math_background.dart';
 import '../services/auth_service.dart';
 import '../services/leaderboard_service.dart';
 import '../services/profile_service.dart';
+import '../services/tutorial_service.dart';
 import '../services/user_progress_service.dart';
+import '../widgets/first_time_tutorial_overlay.dart';
 import 'badges_screen.dart';
 import 'story_levels_screen.dart';
 import 'classroom_quest_screen.dart';
@@ -26,16 +28,148 @@ class _HomeScreenState extends State<HomeScreen> {
   Uint8List? _profilePhoto;
   String _userName = '';
   bool _isDialogOpen = false;
+  bool _showFirstTimeTutorial = false;
+  bool _checkingTutorial = false;
+  final GlobalKey _profileTutorialKey = GlobalKey();
+  final GlobalKey _moduleTutorialKey = GlobalKey();
+  final GlobalKey _levelsTutorialKey = GlobalKey();
+  final GlobalKey _classroomTutorialKey = GlobalKey();
+  final GlobalKey _progressTutorialKey = GlobalKey();
+  final GlobalKey _badgesTutorialKey = GlobalKey();
+  final GlobalKey _leaderboardTutorialKey = GlobalKey();
   StreamSubscription<List<LeaderboardEntry>>? _leaderboardSubscription;
   int? _currentRank;
+
+  List<FirstTimeTutorialStep> get _tutorialSteps => [
+        const FirstTimeTutorialStep(
+          title: 'Welcome to MathQuest!',
+          message:
+              'I’m NPC6, your guide. I’ll show you the main places to explore. Press Next to learn about each one; the highlighted item will not open until you choose it.',
+        ),
+        FirstTimeTutorialStep(
+          title: 'Your Profile',
+          message:
+              'Tap your profile picture to view your account details, update your profile, or log out.',
+          targetKey: _profileTutorialKey,
+        ),
+        FirstTimeTutorialStep(
+          title: 'Modules',
+          message:
+              'Open Modules to explore lessons and practice the math topics available in the game.',
+          targetKey: _moduleTutorialKey,
+        ),
+        FirstTimeTutorialStep(
+          title: 'Levels',
+          message:
+              'Choose Levels to explore the story map, visit question NPCs, and progress through the available stages.',
+          targetKey: _levelsTutorialKey,
+        ),
+        const FirstTimeTutorialStep(
+          title: 'Level Questions & Game Mode',
+          message:
+              'Answer the problem shown for a level to unlock its Play Game Mode option. In that mode, move around and collect the number requested by the problem.',
+        ),
+        const FirstTimeTutorialStep(
+          title: 'Score, Health & Game Controls',
+          message:
+              'During play, the HUD shows your score and health hearts. Correct NPC answers and collected number items each add 10 points. Music toggles the soundtrack, Menu lets you resume or quit, and Back leaves the level.',
+        ),
+        FirstTimeTutorialStep(
+          title: 'Classroom Quests',
+          message:
+              'Open Classroom Quests to view and take part in quests assigned for your classroom.',
+          targetKey: _classroomTutorialKey,
+        ),
+        FirstTimeTutorialStep(
+          title: 'My Progress',
+          message:
+              'My Progress shows your learning activity and progress so you can see how far you have come.',
+          targetKey: _progressTutorialKey,
+        ),
+        FirstTimeTutorialStep(
+          title: 'Badges',
+          message:
+              'Visit Badges to view the achievements you have earned while playing.',
+          targetKey: _badgesTutorialKey,
+        ),
+        FirstTimeTutorialStep(
+          title: 'Leaderboard',
+          message:
+              'The Leaderboard compares players’ scores. Your current rank is also shown near your profile at the top of this screen.',
+          targetKey: _leaderboardTutorialKey,
+        ),
+      ];
 
   @override
   void initState() {
     super.initState();
     _profileService = ProfileService();
+    _checkFirstTimeTutorial();
     _watchCurrentRank();
     _loadProfileData();
     _warmProgressData();
+  }
+
+  Future<void> _checkFirstTimeTutorial() async {
+    final user = AuthService.currentUser;
+    if (user == null || _checkingTutorial) return;
+    _checkingTutorial = true;
+    try {
+      final shouldShow =
+          await TutorialService.shouldShowFirstTimeTutorial(user.uid);
+      if (!mounted) return;
+      setState(() => _showFirstTimeTutorial = shouldShow);
+    } catch (error, stackTrace) {
+      debugPrint('Unable to check first-time tutorial status: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Could not check the tutorial status.'),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: _checkFirstTimeTutorial,
+            ),
+          ),
+        );
+      }
+    } finally {
+      _checkingTutorial = false;
+    }
+  }
+
+  Future<void> _completeFirstTimeTutorial() async {
+    final user = AuthService.currentUser;
+    debugPrint(
+      '[HomeScreen] Finish pressed: authCurrentUser=${user != null}, '
+      'authUid=${user?.uid ?? '(none)'}.',
+    );
+    debugPrint('[HomeScreen] Awaiting tutorial completion save.');
+    await TutorialService.completeFirstTimeTutorial();
+    debugPrint('[HomeScreen] Tutorial completion save returned successfully.');
+    if (!mounted) {
+      debugPrint(
+        '[HomeScreen] Widget unmounted after save; no route navigation needed.',
+      );
+      return;
+    }
+    debugPrint(
+      '[HomeScreen] Dismissing instruction overlay; Home remains the active route.',
+    );
+    setState(() => _showFirstTimeTutorial = false);
+  }
+
+  Future<void> _focusTutorialStep(int index) async {
+    final targetKey = _tutorialSteps[index].targetKey;
+    final targetContext = targetKey?.currentContext;
+    if (targetContext != null) {
+      await Scrollable.ensureVisible(
+        targetContext,
+        alignment: 0.45,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeInOut,
+      );
+    }
   }
 
   void _watchCurrentRank() {
@@ -150,6 +284,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ],
                     ),
+                    key: _profileTutorialKey,
                     child: _profilePhoto != null
                         ? ClipOval(
                             child: Image.memory(
@@ -181,7 +316,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(
                   _currentRank == null
                       ? "You're Currently Rank: —"
-                      : "You're Currently Rank: #$_currentRank",
+                      : "You're Currently Rank:🏆$_currentRank",
                   textAlign: TextAlign.right,
                   style: const TextStyle(
                     fontSize: 12,
@@ -190,6 +325,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
+              if (_showFirstTimeTutorial)
+                Positioned.fill(
+                  child: FirstTimeTutorialOverlay(
+                    steps: _tutorialSteps,
+                    onComplete: _completeFirstTimeTutorial,
+                    onStepChanged: _focusTutorialStep,
+                  ),
+                ),
             ],
           ),
         ),
@@ -242,36 +385,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     context,
                     Icons.view_module,
                     'Module',
+                    tutorialKey: _moduleTutorialKey,
                     onTap: () => _openScreen(const ModulesScreen()),
                   ),
                   menuCard(
                     context,
                     Icons.menu_book,
                     'Levels',
+                    tutorialKey: _levelsTutorialKey,
                     onTap: () => _openScreen(const StoryLevelsScreen()),
                   ),
                   menuCard(
                     context,
                     Icons.assignment_rounded,
                     'Classroom Quests',
+                    tutorialKey: _classroomTutorialKey,
                     onTap: () => _openScreen(const ClassroomQuestScreen()),
                   ),
                   menuCard(
                     context,
                     Icons.bar_chart,
                     'My Progress',
+                    tutorialKey: _progressTutorialKey,
                     onTap: () => _openScreen(const TeacherAnalyticsScreen()),
                   ),
                   menuCard(
                     context,
                     Icons.workspace_premium_rounded,
                     'Badges',
+                    tutorialKey: _badgesTutorialKey,
                     onTap: () => _openScreen(const BadgesScreen()),
                   ),
                   menuCard(
                     context,
                     Icons.emoji_events,
                     'Leaderboard',
+                    tutorialKey: _leaderboardTutorialKey,
                     onTap: () => _openScreen(const LeaderboardScreen()),
                   ),
                   const SizedBox(height: 30),
@@ -289,6 +438,7 @@ class _HomeScreenState extends State<HomeScreen> {
     IconData icon,
     String text, {
     VoidCallback? onTap,
+    GlobalKey? tutorialKey,
   }) {
     final double screenWidth = MediaQuery.of(context).size.width;
     final colors = [
@@ -316,6 +466,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (cardWidth < 320) cardWidth = screenWidth - 26;
 
     return GestureDetector(
+      key: tutorialKey,
       onTap: onTap,
       child: RepaintBoundary(
         child: Container(
